@@ -64,7 +64,21 @@ export default function App() {
   const [showComposerWorkload, setShowComposerWorkload] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [openMoveTaskId, setOpenMoveTaskId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Pointer-based drag state — refs so the document-level listener reads
+  // current values without re-binding on every render.
+  const dragStartRef = useRef<{ x: number; y: number; id: string } | null>(null);
+  const draggedIdRef = useRef<string | null>(null);
+  const dropTargetIdRef = useRef<string | null>(null);
+  draggedIdRef.current = draggedId;
+  dropTargetIdRef.current = dropTargetId;
+
+  // Cursor position during an active drag, for the floating ghost preview.
+  const [dragCursor, setDragCursor] = useState<{ x: number; y: number } | null>(null);
+
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
 
   const locale: Locale = data.settings.locale || 'en';
   const t: Strings = STRINGS[locale];
@@ -100,17 +114,22 @@ export default function App() {
   const tasks = data.tasks;
   const categories = data.categories;
 
+  const filterCatId = data.settings.filterCategoryId ?? null;
+  const filterCategory = filterCatId ? categories.find((c) => c.id === filterCatId) : null;
+
   const counts = useMemo(() => {
     const c = { active: 0, waiting: 0, done: 0, doneToday: 0 };
-    for (const t of tasks) {
+    const pool = filterCatId ? tasks.filter((t) => t.categoryId === filterCatId) : tasks;
+    for (const t of pool) {
       c[t.status] += 1;
       if (t.status === 'done' && t.doneAt && isToday(t.doneAt)) c.doneToday += 1;
     }
-    return { ...c, total: tasks.length };
-  }, [tasks]);
+    return { ...c, total: pool.length };
+  }, [tasks, filterCatId]);
 
   const visible = useMemo(() => {
     let list = tasks;
+    if (filterCatId) list = list.filter((t) => t.categoryId === filterCatId);
     if (filter === 'active') list = list.filter((t) => t.status === 'active');
     else if (filter === 'waiting') list = list.filter((t) => t.status === 'waiting');
     else if (filter === 'done') list = list.filter((t) => t.status === 'done');
@@ -118,10 +137,14 @@ export default function App() {
       const order = (s: TaskStatus) => (s === 'active' ? 0 : s === 'waiting' ? 1 : 2);
       const so = order(a.status) - order(b.status);
       if (so !== 0) return so;
+      // Within "done", show most recently completed first.
       if (a.status === 'done' && b.status === 'done') return (b.doneAt || 0) - (a.doneAt || 0);
-      return b.updatedAt - a.updatedAt;
+      // Within active/waiting: preserve the underlying tasks array order
+      // (JS Array.prototype.sort is stable since ES2019). This is what
+      // makes drag-reorder work — the array order is the source of truth.
+      return 0;
     });
-  }, [tasks, filter]);
+  }, [tasks, filter, filterCatId]);
 
   const categoryById = useMemo(() => {
     const m: Record<string, Category> = {};
@@ -169,6 +192,64 @@ export default function App() {
       ts.splice(newTargetIdx, 0, moved);
       return { ...d, tasks: ts };
     });
+  }
+
+  // Drag-to-reorder using mouse events. (We tried HTML5 drag and pointer
+  // events; mouse events are the simplest thing that's reliable across
+  // Electron's transparent always-on-top window quirks.)
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      const start = dragStartRef.current;
+      if (!start) return;
+
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      const inDrag = draggedIdRef.current !== null;
+
+      if (!inDrag) {
+        if (Math.hypot(dx, dy) < 4) return;
+        setDraggedId(start.id);
+      }
+
+      setDragCursor({ x: e.clientX, y: e.clientY });
+
+      const els = document.elementsFromPoint(e.clientX, e.clientY);
+      const rowEl = els.find(
+        (el) => el instanceof HTMLElement && el.classList.contains('row') && el.dataset.taskId
+      ) as HTMLElement | undefined;
+
+      const targetId = rowEl?.dataset.taskId;
+      const next = targetId && targetId !== start.id ? targetId : null;
+      if (dropTargetIdRef.current !== next) setDropTargetId(next);
+    }
+
+    function onUp() {
+      const start = dragStartRef.current;
+      const wasDragged = draggedIdRef.current;
+      const target = dropTargetIdRef.current;
+      dragStartRef.current = null;
+      if (wasDragged) setDraggedId(null);
+      if (dropTargetIdRef.current) setDropTargetId(null);
+      setDragCursor(null);
+      if (wasDragged && start && target && target !== start.id) {
+        reorderTasks(start.id, target);
+      }
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  function startRowDrag(taskId: string, e: React.MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.closest('button, input, .popover')) return;
+    if (editingId === taskId) return;
+    if (e.button !== 0) return;
+    dragStartRef.current = { x: e.clientX, y: e.clientY, id: taskId };
   }
 
   function setStatus(id: string, status: TaskStatus) {
@@ -280,12 +361,38 @@ export default function App() {
     );
   }
 
+  const anyMenuOpen = openMoveTaskId !== null || showComposerCat || showComposerWorkload || showFilterMenu;
+
+  function setFilterCategory(id: string | null) {
+    setData((d) => ({ ...d, settings: { ...d.settings, filterCategoryId: id } }));
+    setShowFilterMenu(false);
+  }
+
+  const draggedTaskText = draggedId
+    ? tasks.find((t) => t.id === draggedId)?.text
+    : null;
+
   return (
-    <div className="app">
+    <div className={`app ${anyMenuOpen ? 'menu-open' : ''} ${draggedId ? 'app-dragging' : ''}`}>
       <Confetti tick={confettiTick} />
+      {draggedTaskText && dragCursor && (
+        <div
+          className="drag-ghost"
+          style={{ left: dragCursor.x + 12, top: dragCursor.y - 8 }}
+        >
+          {draggedTaskText}
+        </div>
+      )}
 
       <header className="titlebar">
-        <div className="brand"><span className="dot" /> {t.brand}</div>
+        <BrandFilter
+          t={t}
+          categories={categories}
+          activeCategory={filterCategory || undefined}
+          showMenu={showFilterMenu}
+          onToggle={() => setShowFilterMenu((v) => !v)}
+          onPick={setFilterCategory}
+        />
         <div className="titlebar-actions">
           <button className="ico-btn" title={t.settings} onClick={() => setShowSettings(true)}>
             <svg width="13" height="13" viewBox="0 0 16 16">
@@ -346,6 +453,11 @@ export default function App() {
               editingText={editingText}
               dragging={draggedId === task.id}
               dropTarget={dropTargetId === task.id && draggedId !== task.id}
+              moveMenuOpen={openMoveTaskId === task.id}
+              onToggleMoveMenu={() =>
+                setOpenMoveTaskId((prev) => (prev === task.id ? null : task.id))
+              }
+              onCloseMoveMenu={() => setOpenMoveTaskId(null)}
               onEditStart={() => startEdit(task)}
               onEditChange={setEditingText}
               onEditCommit={commitEdit}
@@ -356,31 +468,7 @@ export default function App() {
               onDelete={() => removeTask(task.id)}
               onMoveCategory={(catId) => moveTaskCategory(task.id, catId)}
               onCycleWorkload={() => cycleTaskWorkload(task.id)}
-              onDragStart={(e) => {
-                e.dataTransfer.effectAllowed = 'move';
-                e.dataTransfer.setData('text/plain', task.id);
-                setDraggedId(task.id);
-              }}
-              onDragOver={(e) => {
-                if (!draggedId || draggedId === task.id) return;
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'move';
-                if (dropTargetId !== task.id) setDropTargetId(task.id);
-              }}
-              onDragLeave={() => {
-                if (dropTargetId === task.id) setDropTargetId(null);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                const sourceId = draggedId || e.dataTransfer.getData('text/plain');
-                if (sourceId) reorderTasks(sourceId, task.id);
-                setDraggedId(null);
-                setDropTargetId(null);
-              }}
-              onDragEnd={() => {
-                setDraggedId(null);
-                setDropTargetId(null);
-              }}
+              onMouseDown={(e) => startRowDrag(task.id, e)}
             />
           ))
         )}
@@ -394,6 +482,60 @@ export default function App() {
           <button className="link-btn" onClick={clearDone}>{t.clearDone}</button>
         )}
       </footer>
+    </div>
+  );
+}
+
+function BrandFilter({
+  t, categories, activeCategory, showMenu, onToggle, onPick,
+}: {
+  t: Strings;
+  categories: Category[];
+  activeCategory?: Category;
+  showMenu: boolean;
+  onToggle: () => void;
+  onPick: (id: string | null) => void;
+}) {
+  const wrapRef = useClickOutside<HTMLDivElement>(showMenu, () => {
+    if (showMenu) onToggle();
+  });
+  return (
+    <div className="brand-wrap" ref={wrapRef}>
+      <button
+        className={`brand brand-btn ${activeCategory ? 'brand-filtered' : ''}`}
+        onClick={onToggle}
+        title={activeCategory ? `${t.settingsCategories}: ${activeCategory.name}` : t.brand}
+      >
+        <span
+          className="dot"
+          style={activeCategory ? { background: activeCategory.color, boxShadow: `0 0 10px ${activeCategory.color}` } : undefined}
+        />
+        <span className="brand-label">{activeCategory ? activeCategory.name : t.brand}</span>
+        <svg className="brand-caret" width="7" height="7" viewBox="0 0 8 8">
+          <path d="M1 2.5l3 3 3-3" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+        </svg>
+      </button>
+      {showMenu && (
+        <div className="popover popover-below-left">
+          <button
+            className={`popover-item ${!activeCategory ? 'popover-item-active' : ''}`}
+            onClick={() => onPick(null)}
+          >
+            <span className="popover-dot" style={{ background: 'linear-gradient(135deg, #7c5cff, #4dd0ff)' }} />
+            {t.brand}
+          </button>
+          {categories.map((c) => (
+            <button
+              key={c.id}
+              className={`popover-item ${activeCategory?.id === c.id ? 'popover-item-active' : ''}`}
+              onClick={() => onPick(c.id)}
+            >
+              <span className="popover-dot" style={{ background: c.color }} />
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -517,9 +659,10 @@ function Tab({ label, count, active, onClick }: { label: string; count: number; 
 function TaskRow({
   t, task, category, categories,
   editing, editingText, dragging, dropTarget,
+  moveMenuOpen, onToggleMoveMenu, onCloseMoveMenu,
   onEditStart, onEditChange, onEditCommit, onEditCancel,
   onActive, onWait, onDone, onDelete, onMoveCategory, onCycleWorkload,
-  onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd,
+  onMouseDown,
 }: {
   t: Strings;
   task: Task;
@@ -529,6 +672,9 @@ function TaskRow({
   editingText: string;
   dragging: boolean;
   dropTarget: boolean;
+  moveMenuOpen: boolean;
+  onToggleMoveMenu: () => void;
+  onCloseMoveMenu: () => void;
   onEditStart: () => void;
   onEditChange: (s: string) => void;
   onEditCommit: () => void;
@@ -539,16 +685,11 @@ function TaskRow({
   onDelete: () => void;
   onMoveCategory: (id: string | undefined) => void;
   onCycleWorkload: () => void;
-  onDragStart: (e: React.DragEvent) => void;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
-  onDragEnd: (e: React.DragEvent) => void;
+  onMouseDown: (e: React.MouseEvent) => void;
 }) {
   const ageDays = daysDiff(Date.now(), task.createdAt);
   const stale = task.status !== 'done' && ageDays >= 3;
-  const [showMove, setShowMove] = useState(false);
-  const moveRef = useClickOutside<HTMLDivElement>(showMove, () => setShowMove(false));
+  const moveRef = useClickOutside<HTMLDivElement>(moveMenuOpen, onCloseMoveMenu);
 
   let tail: string | null = null;
   if (task.status === 'done' && task.doneAt) {
@@ -561,14 +702,10 @@ function TaskRow({
 
   return (
     <div
-      className={`row row-${task.status} ${stale ? 'row-stale' : ''} ${dragging ? 'row-dragging' : ''} ${dropTarget ? 'row-drop-target' : ''} ${showMove ? 'row-menu-open' : ''}`}
+      className={`row row-${task.status} ${stale ? 'row-stale' : ''} ${dragging ? 'row-dragging' : ''} ${dropTarget ? 'row-drop-target' : ''} ${moveMenuOpen ? 'row-menu-open' : ''}`}
       style={category ? { ['--row-color' as any]: category.color } : undefined}
-      draggable={!editing}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-      onDragEnd={onDragEnd}
+      data-task-id={task.id}
+      onMouseDown={onMouseDown}
     >
       <span className="row-rail" />
       {task.workload && (
@@ -619,16 +756,16 @@ function TaskRow({
           <svg width="11" height="11" viewBox="0 0 14 14"><path d="M2 12l1-3 6-6 2 2-6 6-3 1z" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinejoin="round"/></svg>
         </button>
         <div className="cat-menu-wrap" ref={moveRef}>
-          <button className="mini-btn" title={t.rowMoveTitle} onClick={() => setShowMove(!showMove)}>
+          <button className="mini-btn" title={t.rowMoveTitle} onClick={onToggleMoveMenu}>
             <svg width="11" height="11" viewBox="0 0 14 14"><path d="M2 4h6l1.5 2H12a1 1 0 011 1v3a1 1 0 01-1 1H2a1 1 0 01-1-1V5a1 1 0 011-1z" fill="currentColor" opacity="0.85"/></svg>
           </button>
-          {showMove && (
+          {moveMenuOpen && (
             <div className="popover popover-below-right">
               {categories.map((c) => (
                 <button
                   key={c.id}
                   className={`popover-item ${task.categoryId === c.id ? 'popover-item-active' : ''}`}
-                  onClick={() => { onMoveCategory(c.id); setShowMove(false); }}
+                  onClick={() => { onMoveCategory(c.id); onCloseMoveMenu(); }}
                 >
                   <span className="popover-dot" style={{ background: c.color }} />
                   {c.name}
@@ -636,7 +773,7 @@ function TaskRow({
               ))}
               <button
                 className={`popover-item ${!task.categoryId ? 'popover-item-active' : ''}`}
-                onClick={() => { onMoveCategory(undefined); setShowMove(false); }}
+                onClick={() => { onMoveCategory(undefined); onCloseMoveMenu(); }}
               >
                 <span className="popover-dot popover-dot-none" />
                 {t.uncategorized}

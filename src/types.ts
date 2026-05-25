@@ -24,6 +24,8 @@ export type Locale = 'en' | 'zh';
 export interface Settings {
   alwaysOnTop?: boolean;
   activeCategoryId?: string;
+  // Category filter for the main list view (null/undefined = show all).
+  filterCategoryId?: string | null;
   locale?: Locale;
   // One-time flag: pre-categories tasks (where categoryId was undefined)
   // get auto-assigned to the first category once.

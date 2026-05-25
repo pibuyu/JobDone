@@ -94,7 +94,7 @@ function createWindow() {
     resizable: true,
     minWidth: 280,
     minHeight: 360,
-    alwaysOnTop: true,
+    alwaysOnTop: !isDev,
     skipTaskbar: false,
     icon: isWin ? path.join(__dirname, '..', 'build', 'icon.ico') : undefined,
     ...platformBg,
@@ -106,13 +106,16 @@ function createWindow() {
     },
   });
 
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  if (!isDev) {
+    mainWindow.setAlwaysOnTop(true, 'floating');
+  }
   if (isMac) {
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5180');
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
