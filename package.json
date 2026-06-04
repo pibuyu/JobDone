@@ -47,6 +47,8 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "build/tray*.png",
+      "build/icon.ico",
       "!dist/mac-arm64/**",
       "!dist/builder-debug.yml"
     ],

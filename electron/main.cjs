@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -8,9 +8,13 @@ const isWin = process.platform === 'win32';
 
 const userDataDir = app.getPath('userData');
 const dataFile = path.join(userDataDir, 'jobdone.json');
+const expandedMinHeight = 360;
+const compactMinHeight = 72;
 
 let mainWindow = null;
 let tray = null;
+let expandedHeight = 400;
+let compactMode = false;
 
 function readData() {
   try {
@@ -31,6 +35,7 @@ function writeData(data) {
     const tmp = `${dataFile}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
     fs.renameSync(tmp, dataFile);
+    updateTrayStatus(data);
     return true;
   } catch (err) {
     console.error('writeData error', err);
@@ -93,7 +98,7 @@ function createWindow() {
     hasShadow: true,
     resizable: true,
     minWidth: 280,
-    minHeight: 360,
+    minHeight: expandedMinHeight,
     alwaysOnTop: !isDev,
     skipTaskbar: false,
     icon: isWin ? path.join(__dirname, '..', 'build', 'icon.ico') : undefined,
@@ -123,6 +128,10 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+  mainWindow.on('resize', () => {
+    if (!mainWindow || compactMode) return;
+    expandedHeight = mainWindow.getSize()[1];
+  });
 }
 
 function trayIconImage() {
@@ -130,8 +139,12 @@ function trayIconImage() {
   if (isMac) {
     const p = path.join(buildDir, 'trayTemplate.png');
     const img = nativeImage.createFromPath(p);
-    img.setTemplateImage(true);
-    return img;
+    if (!img.isEmpty()) {
+      img.setTemplateImage(true);
+      return img;
+    }
+    const fallback = nativeImage.createFromPath(path.join(process.resourcesPath, 'icon.icns'));
+    if (!fallback.isEmpty()) return fallback.resize({ width: 16, height: 16 });
   }
   if (isWin) {
     return nativeImage.createFromPath(path.join(buildDir, 'icon.ico'));
@@ -139,9 +152,28 @@ function trayIconImage() {
   return nativeImage.createFromPath(path.join(buildDir, 'tray.png'));
 }
 
+function countOpenRootTasks(data) {
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  return tasks.filter((task) => task && task.status !== 'done').length;
+}
+
+function formatTrayCount(count) {
+  if (count > 99) return '99+';
+  return String(Math.max(0, count));
+}
+
+function updateTrayStatus(data = readData()) {
+  if (!tray) return;
+  const count = countOpenRootTasks(data);
+  tray.setToolTip(`JobDone · ${count} 条待办`);
+  if (isMac) {
+    tray.setTitle(formatTrayCount(count), { fontType: 'monospacedDigit' });
+  }
+}
+
 function createTray() {
   tray = new Tray(trayIconImage());
-  tray.setToolTip('JobDone');
+  updateTrayStatus();
   const menu = Menu.buildFromTemplate([
     { label: 'Show JobDone', click: () => mainWindow && mainWindow.show() },
     { label: 'Hide JobDone', click: () => mainWindow && mainWindow.hide() },
@@ -170,6 +202,32 @@ ipcMain.handle('window:minimize', () => mainWindow && mainWindow.minimize());
 ipcMain.handle('window:set-always-on-top', (_evt, flag) => {
   if (mainWindow) mainWindow.setAlwaysOnTop(!!flag, 'floating');
   return !!flag;
+});
+ipcMain.handle('window:set-compact-height', (_evt, height) => {
+  if (!mainWindow) return false;
+  const nextHeight = Math.max(compactMinHeight, Math.min(340, Math.round(Number(height) || compactMinHeight)));
+  if (!compactMode) expandedHeight = Math.max(expandedMinHeight, mainWindow.getSize()[1]);
+  compactMode = true;
+  mainWindow.setMinimumSize(280, compactMinHeight);
+  mainWindow.setSize(mainWindow.getSize()[0], nextHeight, true);
+  return true;
+});
+ipcMain.handle('window:restore-expanded-height', () => {
+  if (!mainWindow) return false;
+  compactMode = false;
+  mainWindow.setMinimumSize(280, expandedMinHeight);
+  mainWindow.setSize(mainWindow.getSize()[0], Math.max(expandedMinHeight, expandedHeight), true);
+  return true;
+});
+ipcMain.handle('link:open-external', (_evt, href) => {
+  try {
+    const url = new URL(String(href));
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    shell.openExternal(url.href);
+    return true;
+  } catch {
+    return false;
+  }
 });
 
 app.whenReady().then(() => {
