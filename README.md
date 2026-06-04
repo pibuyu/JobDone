@@ -8,10 +8,18 @@
 
 ### 推荐方式：下载 DMG
 
-1. 打开项目的 GitHub Releases 页面。
+1. 打开项目的 [GitHub Releases 页面](https://github.com/pibuyu/JobDone/releases)。
 2. 下载 `JobDone-0.2.1-mac-arm64.dmg`。
 3. 双击打开 DMG，把 `JobDone.app` 拖到 `Applications`。
 4. 第一次启动时，如果 macOS 提示未签名应用，打开 Finder 中的 `Applications`，右键 `JobDone`，选择 `打开`。
+
+### 一行命令下载安装
+
+```bash
+curl -L -o JobDone-0.2.1-mac-arm64.dmg \
+  https://github.com/pibuyu/JobDone/releases/download/v0.2.1-lightweight/JobDone-0.2.1-mac-arm64.dmg
+open JobDone-0.2.1-mac-arm64.dmg
+```
 
 ### 已拿到 DMG 文件时的命令安装
 
@@ -29,7 +37,7 @@ open /Applications/JobDone.app
 适合需要自己打包或二次改造的同事：
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/pibuyu/JobDone.git
 cd JobDone
 npm ci
 npm run build
